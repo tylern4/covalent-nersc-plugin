@@ -168,12 +168,6 @@ class SFapiExecutor(AsyncBaseExecutor):
 
         self.cleanup = get_config("executors.sfapi.cleanup") if cleanup is None else cleanup
 
-        # Ensure that the slurm data is parsable
-        if "parsable" not in self.options:
-            self.options["parsable"] = ""
-
-        self.LOAD_SLURM_PREFIX = "source /etc/profile\n module whatis slurm &> /dev/null\n if [ $? -eq 0 ] ; then\n module load slurm\n fi\n"
-
     async def _client_connect(self) -> AsyncCompute:
         """
         Helper function for connecting to the remote machine through sfapi_client module.
@@ -188,10 +182,11 @@ class SFapiExecutor(AsyncBaseExecutor):
         if not self.cert_file:
             raise ValueError("sfapi certificate is a required parameter in the sfapi plugin.")
 
-        self.client = await AsyncSFapiClient(key=self.cert_file)
+        self.client = AsyncSFapiClient(key=self.cert_file)
 
         try:
-            self.username = await self.client.user().name
+            user = await self.client.user()
+            self.username = user.name
         except SfApiError as e:
             raise RuntimeError(
                 f"Could not authenticate client from keys: {self.cert_file}", e
@@ -401,7 +396,7 @@ with open("{result_filename}", "wb") as f:
             return Result.NEW_OBJ
 
         app_log.debug(f"Calling conn.job({job_id=}, command='sacct')")
-        job_status = await conn.job(job_id=job_id, command="sacct")
+        job_status = await conn.job(jobid=job_id, command="sacct")
 
         return job_status
 
@@ -417,7 +412,7 @@ with open("{result_filename}", "wb") as f:
         """
 
         # Poll status every `poll_freq` seconds
-        job = await conn.job(job_id=job_id, command="sacct")
+        job = await conn.job(jobid=job_id, command="sacct")
         try:
             await job.complete()  # timeout=...
         except TimeoutError:

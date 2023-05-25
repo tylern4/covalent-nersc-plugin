@@ -64,10 +64,10 @@ _EXECUTOR_PLUGIN_DEFAULTS = {
     "cleanup": True,
 }
 
-executor_plugin_name = "SlurmExecutor"
+executor_plugin_name = "SFapiExecutor"
 
 
-class SlurmExecutor(AsyncBaseExecutor):
+class SFapiExecutor(AsyncBaseExecutor):
     """Slurm executor plugin class.
 
     Args:

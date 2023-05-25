@@ -35,11 +35,11 @@ with open("requirements.txt") as f:
 
 # Modify this to be the name of your plugin file. Here, "covalent_executor_template"
 # is the name of the directory the plugin is in. "custom" is name of the module.
-plugins_list = ["custom = covalent_executor_template.custom", "custom_async = covalent_executor_template.custom_async"]
+plugins_list = ["sfapi = covalent_sfapi_plugin.sfapi"]
 
 setup_info = {
     # Your plugin should use the naming convention 'covalent-abcdef-plugin'
-    "name": "covalent-executor-template",
+    "name": "covalent-sfapi-plugin",
     "packages": find_packages("."),
     "version": version,
     # Modify any contact information as you see fit

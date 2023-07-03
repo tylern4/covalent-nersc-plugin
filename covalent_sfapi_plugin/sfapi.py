@@ -18,9 +18,10 @@
 #
 # Relief from the License may be granted by purchasing a commercial license.
 
-"""SF Api executor plugin, based on Slurm plugin, for the Covalent dispatcher."""
+"""SuperFacility API executor plugin, based on the Covalent-Slurm plugin."""
 
 import asyncio
+import io
 import os
 import sys
 from copy import deepcopy
@@ -28,9 +29,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Union
 
-import aiofiles
 import cloudpickle as pickle
-from aiofiles import os as async_os
 from covalent._results_manager.result import Result
 from covalent._shared_files import logger
 from covalent._shared_files.config import get_config
@@ -50,9 +49,7 @@ _EXECUTOR_PLUGIN_DEFAULTS = {
     "remote_workdir": "covalent-workdir",
     "create_unique_workdir": False,
     "conda_env": "",
-    "options": {
-        "parsable": "",
-    },
+    "options": {},
     "prerun_commands": None,
     "postrun_commands": None,
     "use_srun": True,
@@ -60,15 +57,14 @@ _EXECUTOR_PLUGIN_DEFAULTS = {
     "srun_append": None,
     "bashrc_path": "$HOME/.bashrc",
     "cache_dir": str(Path(get_config("dispatcher.cache_dir")).expanduser().resolve()),
-    "poll_freq": 60,
     "cleanup": True,
 }
 
-executor_plugin_name = "SFapiExecutor"
+executor_plugin_name = "SuperFacilityExecutor"
 
 
-class SFapiExecutor(AsyncBaseExecutor):
-    """Slurm executor plugin class.
+class SuperFacilityExecutor(AsyncBaseExecutor):
+    """SuperFacility executor plugin class.
 
     Args:
         machine: Remote NERSC machine.
@@ -84,7 +80,6 @@ class SFapiExecutor(AsyncBaseExecutor):
         srun_append: Command nested into srun call.
         bashrc_path: Path to the bashrc file to source before running the function.
         cache_dir: Local cache directory used by this executor for temporary files.
-        poll_freq: Frequency with which to poll a submitted job. Always is >= 60.
         cleanup: Whether to perform cleanup or not on remote machine.
     """
 
@@ -103,7 +98,6 @@ class SFapiExecutor(AsyncBaseExecutor):
         srun_append: str = None,
         bashrc_path: str = None,
         cache_dir: str = None,
-        poll_freq: int = None,
         cleanup: bool = None,
         **kwargs,
     ):
@@ -161,11 +155,6 @@ class SFapiExecutor(AsyncBaseExecutor):
         self.prerun_commands = list(prerun_commands) if prerun_commands else []
         self.postrun_commands = list(postrun_commands) if postrun_commands else []
 
-        self.poll_freq = poll_freq or get_config("executors.sfapi.poll_freq")
-        if self.poll_freq < 60:
-            print("Polling frequency will be increased to the minimum for Slurm: 60 seconds.")
-            self.poll_freq = 60
-
         self.cleanup = get_config("executors.sfapi.cleanup") if cleanup is None else cleanup
 
     async def _client_connect(self) -> AsyncCompute:
@@ -203,39 +192,6 @@ class SFapiExecutor(AsyncBaseExecutor):
             raise RuntimeError(f"Cannot run on compute resource {self.machine}, {conn.status}")
 
         return conn
-
-    async def perform_cleanup(
-        self,
-        conn: AsyncCompute,
-        remote_func_filename: str,
-        remote_slurm_filename: str,
-        remote_py_filename: str,
-        remote_result_filename: str,
-        remote_stdout_filename: str,
-        remote_stderr_filename: str,
-    ) -> None:
-        """
-        Function to perform cleanup on remote machine
-
-        Args:
-            conn: SSH connection object
-            remote_func_filename: Function file on remote machine
-            remote_slurm_filename: Slurm script file on remote machine
-            remote_py_filename: Python script file on remote machine
-            remote_result_filename: Result file on remote machine
-            remote_stdout_filename: Standard out file on remote machine
-            remote_stderr_filename: Standard error file on remote machine
-
-        Returns:
-            None
-        """
-        # Might be a better way with sfapi
-        await conn.run(f"rm {remote_func_filename}")
-        await conn.run(f"rm {remote_slurm_filename}")
-        await conn.run(f"rm {remote_py_filename}")
-        await conn.run(f"rm {remote_result_filename}")
-        await conn.run(f"rm {remote_stdout_filename}")
-        await conn.run(f"rm {remote_stderr_filename}")
 
     def _format_submit_script(
         self, python_version: str, py_filename: str, current_remote_workdir: str
@@ -376,30 +332,6 @@ with open("{result_filename}", "wb") as f:
     pickle.dump((result, exception), f)
 """
 
-    async def get_status(
-        self, info_dict: dict, conn: AsyncCompute
-    ) -> Union[Result, str]:
-        """Query the status of a job previously submitted to Slurm.
-
-        Args:
-            info_dict: a dictionary containing all necessary parameters needed to query the
-                status of the execution. Required keys in the dictionary are:
-                    A string mapping "job_id" to Slurm job ID.
-            conn: SSH connection object.
-
-        Returns:
-            status: String describing the job status.
-        """
-
-        job_id = info_dict.get("job_id")
-        if job_id is None:
-            return Result.NEW_OBJ
-
-        app_log.debug(f"Calling conn.job({job_id=}, command='sacct')")
-        job_status = await conn.job(jobid=job_id, command="sacct")
-
-        return job_status
-
     async def _poll_slurm(self, job_id: int, conn: AsyncCompute) -> None:
         """Poll a Slurm job until completion.
 
@@ -411,7 +343,6 @@ with open("{result_filename}", "wb") as f:
             None
         """
 
-        # Poll status every `poll_freq` seconds
         job = await conn.job(jobid=job_id, command="sacct")
         try:
             await job.complete()  # timeout=...
@@ -431,35 +362,31 @@ with open("{result_filename}", "wb") as f:
             result: Task result.
         """
 
-        # Check the result file exists on the remote backend
-        remote_result_filename: AsyncRemotePath = conn.ls(os.path.join(self.remote_workdir, result_filename))
-
-        if not remote_result_filename.is_file():
+        # Stream files from remote machine to Covalent server
+        remote_result_filename = os.path.join(self.remote_workdir, result_filename)
+        try:
+            [remote_result] = await conn.ls(remote_result_filename)
+            result_stream = await remote_result.download(binary=True)
+        except SfApiError:
             raise FileNotFoundError(remote_result_filename)
 
-        # Copy result file from remote machine to Covalent server
-        local_result_filename = os.path.join(task_results_dir, result_filename)
-        await task_results_dir.download()
+        remote_stdout_filename = os.path.join(self.remote_workdir, os.path.basename(self.options["output"]))
+        try:
+            [remote_stdout] = await conn.ls(remote_stdout_filename)
+            stdout_stream = await remote_stdout.download(binary=True)
+        except SfApiError:
+            raise FileNotFoundError(remote_stdout_filename)
 
-        # Copy stdout, stderr from remote machine to Covalent server
-        stdout_file = await conn.ls(os.path.join(task_results_dir, os.path.basename(self.options["output"])))
-        stderr_file = await conn.ls(os.path.join(task_results_dir, os.path.basename(self.options["error"])))
+        remote_stderr_filename = os.path.join(self.remote_workdir, os.path.basename(self.options["error"]))
+        try:
+            [remote_stderr] = await conn.ls(remote_stderr_filename)
+            stderr_stream = await remote_stderr.download(binary=True)
+        except SfApiError:
+            raise FileNotFoundError(remote_stderr_filename)
 
-        await stdout_file.download()
-        await stderr_file.download()
-
-        async with aiofiles.open(local_result_filename, "rb") as f:
-            contents = await f.read()
-            result, exception = pickle.loads(contents)
-        await async_os.remove(local_result_filename)
-
-        async with aiofiles.open(stdout_file, "r") as f:
-            stdout = await f.read()
-        await async_os.remove(stdout_file)
-
-        async with aiofiles.open(stderr_file, "r") as f:
-            stderr = await f.read()
-        await async_os.remove(stderr_file)
+        result, exception = pickle.loads(result_stream.getbuffer())
+        stdout = stdout_stream.getbuffer()
+        stderr = stderr_stream.getbuffer()
 
         return result, stdout, stderr, exception
 
@@ -488,7 +415,6 @@ with open("{result_filename}", "wb") as f:
             current_remote_workdir = self.remote_workdir
 
         result_filename = f"result-{dispatch_id}-{node_id}.pkl"
-        slurm_filename = f"slurm-{dispatch_id}-{node_id}.sh"
         py_script_filename = f"script-{dispatch_id}-{node_id}.py"
         func_filename = f"func-{dispatch_id}-{node_id}.pkl"
 
@@ -514,44 +440,29 @@ with open("{result_filename}", "wb") as f:
         await conn.run(cmd_mkdir_remote)
 
         try:
-            current_remote_workdir: AsyncRemotePath = await conn.ls(path=current_remote_workdir, directory=True)
-            current_remote_workdir.is_dir()
+            [remote_workdir] = await conn.ls(path=self.remote_workdir, directory=True)
+            func_bytes = io.BytesIO()
+            pickle.dump((function, args, kwargs), func_bytes)
+            func_bytes.filename = func_filename
+            await remote_workdir.upload(func_bytes)
+
+            python_exec_script = self._format_py_script(func_filename, result_filename)
+            py_bytes = io.BytesIO(bytes(python_exec_script, "ascii"))
+            py_bytes.filename = py_script_filename
+            await remote_workdir.upload(py_bytes)
+            
         except SfApiError as e:
-            RuntimeError(e)
+            raise RuntimeError(e)
 
-        # TODO:
-        # async with aiofiles.tempfile.NamedTemporaryFile(dir=self.cache_dir) as temp_f:
-        #     # Pickle the function, write to file, and copy to remote filesystem
-        #     app_log.debug("Writing pickled function, args, kwargs to file...")
-        #     await temp_f.write(pickle.dumps((function, args, kwargs)))
-        #     await temp_f.flush()
-
-        #     remote_func_filename = os.path.join(self.remote_workdir, func_filename)
-        #     app_log.debug(f"Copying pickled function to remote fs: {remote_func_filename} ...")
-        #     await asyncssh.scp(temp_f.name, (conn, remote_func_filename))
-
-        # async with aiofiles.tempfile.NamedTemporaryFile(dir=self.cache_dir, mode="w") as temp_g:
-        #     # Format the function execution script, write to file, and copy to remote filesystem
-        #     python_exec_script = self._format_py_script(func_filename, result_filename)
-        #     app_log.debug("Writing python run-function script to tempfile...")
-        #     await temp_g.write(python_exec_script)
-        #     await temp_g.flush()
-
-        #     remote_py_script_filename = os.path.join(self.remote_workdir, py_script_filename)
-        #     app_log.debug(f"Copying python run-function to remote fs: {remote_py_script_filename}")
-        #     await asyncssh.scp(temp_g.name, (conn, remote_py_script_filename))
-
-        # TODO
         slurm_submit_script = self._format_submit_script(
             py_version_func, py_script_filename, current_remote_workdir
         )
 
         try:
             job_info = await conn.submit_job(slurm_submit_script)
+            slurm_job_id = job_info.jobid
         except SfApiError as e:
-            RuntimeError(e)
-
-        slurm_job_id = job_info.jobid
+            raise RuntimeError(e)
 
         app_log.debug(f"Polling slurm with job_id: {slurm_job_id} ...")
         await self._poll_slurm(slurm_job_id, conn)
@@ -568,13 +479,9 @@ with open("{result_filename}", "wb") as f:
             raise RuntimeError(exception)
 
         app_log.debug("Preparing for teardown...")
-        self._remote_func_filename = remote_func_filename
-        self._result_filename = result_filename
-        self._remote_py_script_filename = remote_py_script_filename
-
-        app_log.debug("Closing SSH connection...")
-        await conn.close()
-        app_log.debug("SSH connection closed, returning result")
+        self._remote_func_filename = os.path.join(self.remote_workdir, func_filename)
+        self._remote_py_script_filename = os.path.join(self.remote_workdir, py_script_filename)
+        self._remote_result_filename = os.path.join(self.remote_workdir, result_filename)
 
         return result
 
@@ -591,21 +498,6 @@ with open("{result_filename}", "wb") as f:
             try:
                 app_log.debug("Performing cleanup on remote...")
                 conn = await self._client_connect()
-                await self.perform_cleanup(
-                    conn=conn,
-                    remote_func_filename=self._remote_func_filename,
-                    remote_slurm_filename=self._remote_slurm_filename,
-                    remote_py_filename=self._remote_py_script_filename,
-                    remote_result_filename=os.path.join(
-                        self.remote_workdir, self._result_filename
-                    ),
-                    remote_stdout_filename=self.options["output"],
-                    remote_stderr_filename=self.options["error"],
-                )
-
-                app_log.debug("Closing SSH connection...")
-                conn.close()
-                await conn.wait_closed()
-                app_log.debug("SSH connection closed, teardown complete")
+                await conn.run(f"rm -f {self._remote_func_filename} {self._remote_py_script_filename} {self._remote_result_filename} {self.options['output']} {self.options['error']}")
             except Exception:
                 app_log.warning("Slurm cleanup could not successfully complete. Nonfatal error.")

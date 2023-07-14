@@ -31,7 +31,7 @@ with open("VERSION") as f:
 with open("requirements.txt") as f:
     required = f.read().splitlines()
 
-plugins_list = ["nersc = covalent_sfapi_plugin.sfapi"]
+plugins_list = ["nersc = covalent_nersc_plugin.nersc"]
 
 setup_info = {
     "name": "covalent-nersc-plugin",

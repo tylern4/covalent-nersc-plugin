@@ -18,7 +18,7 @@
 #
 # Relief from the License may be granted by purchasing a commercial license.
 
-"""SuperFacility API executor plugin, based on the Covalent-Slurm plugin."""
+"""Nersc API executor plugin, based on the Covalent-Slurm plugin."""
 
 import asyncio
 import io
@@ -60,11 +60,11 @@ _EXECUTOR_PLUGIN_DEFAULTS = {
     "cleanup": True,
 }
 
-executor_plugin_name = "SuperFacilityExecutor"
+executor_plugin_name = "NerscExecutor"
 
 
-class SuperFacilityExecutor(AsyncBaseExecutor):
-    """SuperFacility executor plugin class.
+class NerscExecutor(AsyncBaseExecutor):
+    """Nersc executor plugin class.
 
     Args:
         machine: Remote NERSC machine.
@@ -103,59 +103,59 @@ class SuperFacilityExecutor(AsyncBaseExecutor):
     ):
         super().__init__(**kwargs)
 
-        self.machine = machine or get_config("executors.sfapi.machine")
+        self.machine = machine or get_config("executors.nersc.machine")
 
         try:
-            self.cert_file = cert_file or get_config("executors.sfapi.cert_file")
+            self.cert_file = cert_file or get_config("executors.nersc.cert_file")
         except KeyError:
             self.cert_file = None
 
-        self.remote_workdir = remote_workdir or get_config("executors.sfapi.remote_workdir")
+        self.remote_workdir = remote_workdir or get_config("executors.nersc.remote_workdir")
 
         self.create_unique_workdir = (
-            get_config("executors.sfapi.create_unique_workdir")
+            get_config("executors.nersc.create_unique_workdir")
             if create_unique_workdir is None
             else create_unique_workdir
         )
 
         try:
             self.conda_env = (
-                get_config("executors.sfapi.conda_env") if conda_env is None else conda_env
+                get_config("executors.nersc.conda_env") if conda_env is None else conda_env
             )
         except KeyError:
             self.conda_env = None
 
         try:
             self.bashrc_path = (
-                get_config("executors.sfapi.bashrc_path") if bashrc_path is None else bashrc_path
+                get_config("executors.nersc.bashrc_path") if bashrc_path is None else bashrc_path
             )
         except KeyError:
             self.bashrc_path = None
 
-        self.cache_dir = cache_dir or get_config("executors.sfapi.cache_dir")
+        self.cache_dir = cache_dir or get_config("executors.nersc.cache_dir")
         if not os.path.exists(self.cache_dir):
             os.makedirs(self.cache_dir)
 
         # To allow passing empty dictionary
         if options is None:
-            options = get_config("executors.sfapi.options")
+            options = get_config("executors.nersc.options")
         self.options = deepcopy(options)
 
-        self.use_srun = get_config("executors.sfapi.use_srun") if use_srun is None else use_srun
+        self.use_srun = get_config("executors.nersc.use_srun") if use_srun is None else use_srun
 
         if srun_options is None:
-            srun_options = get_config("executors.sfapi.srun_options")
+            srun_options = get_config("executors.nersc.srun_options")
         self.srun_options = deepcopy(srun_options)
 
         try:
-            self.srun_append = srun_append or get_config("executors.sfapi.srun_append")
+            self.srun_append = srun_append or get_config("executors.nersc.srun_append")
         except KeyError:
             self.srun_append = None
 
         self.prerun_commands = list(prerun_commands) if prerun_commands else []
         self.postrun_commands = list(postrun_commands) if postrun_commands else []
 
-        self.cleanup = get_config("executors.sfapi.cleanup") if cleanup is None else cleanup
+        self.cleanup = get_config("executors.nersc.cleanup") if cleanup is None else cleanup
 
     async def _client_connect(self) -> AsyncCompute:
         """
@@ -169,7 +169,7 @@ class SuperFacilityExecutor(AsyncBaseExecutor):
         """
 
         if not self.cert_file:
-            raise ValueError("sfapi certificate is a required parameter in the sfapi plugin.")
+            raise ValueError("sfapi certificate is a required parameter in the NERSC plugin.")
 
         self.client = AsyncSFapiClient(key=self.cert_file)
 
@@ -450,7 +450,7 @@ with open("{result_filename}", "wb") as f:
             py_bytes = io.BytesIO(bytes(python_exec_script, "ascii"))
             py_bytes.filename = py_script_filename
             await remote_workdir.upload(py_bytes)
-            
+
         except SfApiError as e:
             raise RuntimeError(e)
 
